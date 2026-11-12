@@ -1,0 +1,232 @@
+openapi: 3.0.3
+info:
+  title: Fluxo Financial API
+  version: 1.0.0
+  description: Cookie session authentication with Laravel Sanctum. First obtain CSRF cookies via /sanctum/csrf-cookie, then send X-XSRF-TOKEN on mutations. All amounts are integer BRL cents.
+servers:
+  - url: http://localhost:3196
+security:
+  - session: []
+components:
+  securitySchemes:
+    session: { type: apiKey, in: cookie, name: fluxo_session }
+  schemas:
+    Transaction:
+      type: object
+      properties:
+        id: { type: integer }
+        date: { type: string, format: date }
+        description: { type: string }
+        amount: { type: integer, minimum: 1 }
+        type: { type: string, enum: [income, expense] }
+    Dashboard:
+      type: object
+      properties:
+        income: { type: integer }
+        expense: { type: integer }
+        balance: { type: integer }
+        count: { type: integer }
+        months:
+          type: array
+          items:
+            type: object
+            properties:
+              month: { type: string, example: "2026-01" }
+              income: { type: integer }
+              expense: { type: integer }
+    Import:
+      type: object
+      properties:
+        id: { type: integer }
+        filename: { type: string }
+        status:
+          {
+            type: string,
+            enum: [pending, processing, retrying, completed, failed],
+          }
+        total_rows: { type: integer }
+        processed_rows: { type: integer }
+        progress: { type: integer }
+        errors: { type: array, nullable: true, items: { type: string } }
+paths:
+  /sanctum/csrf-cookie:
+    get:
+      security: []
+      summary: Establish CSRF cookie
+      responses:
+        "204": { description: Cookie set }
+  /api/login:
+    post:
+      security: []
+      summary: Authenticate using email/password and CSRF token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, format: password }
+      responses:
+        "200": { description: Authenticated profile }
+        "422": { description: Invalid credentials }
+        "429": { description: Rate limited }
+  /api/user:
+    get:
+      summary: Current authenticated profile
+      responses:
+        "200": { description: Profile }
+        "401": { description: Authentication required }
+  /api/logout:
+    post:
+      summary: End current session
+      responses:
+        "204": { description: Session invalidated }
+  /api/dashboard:
+    get:
+      summary: Cached financial totals and monthly series
+      parameters:
+        - { in: query, name: from, schema: { type: string, format: date } }
+        - { in: query, name: to, schema: { type: string, format: date } }
+      responses:
+        "200":
+          {
+            description: Dashboard,
+            content:
+              {
+                application/json:
+                  { schema: { $ref: "#/components/schemas/Dashboard" } },
+              },
+          }
+  /api/transactions:
+    get:
+      summary: Paginated owned transactions
+      parameters:
+        - { in: query, name: page, schema: { type: integer, minimum: 1 } }
+        - {
+            in: query,
+            name: per_page,
+            schema: { type: integer, minimum: 10, maximum: 100, default: 15 },
+          }
+        - {
+            in: query,
+            name: type,
+            schema: { type: string, enum: [income, expense] },
+          }
+        - { in: query, name: q, schema: { type: string, maxLength: 150 } }
+        - { in: query, name: from, schema: { type: string, format: date } }
+        - { in: query, name: to, schema: { type: string, format: date } }
+      responses:
+        "200": { description: Laravel paginator containing Transaction records }
+        "422": { description: Invalid filters }
+  /api/imports:
+    get:
+      summary: Paginated owned import history
+      parameters:
+        - { in: query, name: page, schema: { type: integer, minimum: 1 } }
+      responses:
+        "200": { description: Laravel paginator containing Import records }
+    post:
+      summary: Store private CSV/OFX and enqueue background processing
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  {
+                    type: string,
+                    format: binary,
+                    description: CSV or OFX up to 20 MB,
+                  }
+      responses:
+        "202": { description: New import queued }
+        "200":
+          { description: Duplicate file returns existing import, no new job }
+        "422": { description: Invalid upload }
+  /api/imports/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: integer } }
+    get:
+      summary: Owned import status and progress
+      responses:
+        "200":
+          {
+            description: Import,
+            content:
+              {
+                application/json:
+                  { schema: { $ref: "#/components/schemas/Import" } },
+              },
+          }
+        "404": { description: Missing or not owned }
+  /api/imports/{id}/retry:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: integer } }
+    post:
+      summary: Retry failed owned import
+      responses:
+        "202": { description: Requeued }
+        "409": { description: Import is not failed }
+        "410": { description: Private source file is unavailable }
+  /api/sample:
+    get:
+      summary: Download provided financial CSV
+      responses:
+        "200": { description: CSV file }
+
+  /api/transactions/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: integer } }
+    patch:
+      summary: Edit an owned active transaction and invalidate dashboard cache
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [description, date, amount, type]
+              properties:
+                description: { type: string, minLength: 1, maxLength: 500 }
+                date: { type: string, format: date }
+                amount: { type: integer, minimum: 1, maximum: 10000000000 }
+                type: { type: string, enum: [income, expense] }
+      responses:
+        "200": { description: Updated transaction }
+        "404": { description: Missing or not owned }
+        "409":
+          {
+            description: Change would duplicate an existing identified transaction,
+          }
+        "422": { description: Invalid fields }
+    delete:
+      summary: Soft-delete an owned transaction
+      responses:
+        "204": { description: Deleted, identities preserved }
+        "404": { description: Missing or not owned }
+  /api/transactions/{id}/restore:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: integer } }
+    post:
+      summary: Restore an owned user-deleted transaction
+      responses:
+        "200": { description: Restored transaction }
+        "404": { description: Missing or not owned }
+  /api/documentation/{kind}:
+    parameters:
+      - {
+          in: path,
+          name: kind,
+          required: true,
+          schema: { type: string, enum: [readme, api] },
+        }
+    get:
+      summary: Download authenticated project documentation
+      responses:
+        "200": { description: README or OpenAPI attachment }

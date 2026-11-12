@@ -1,0 +1,95 @@
+name: fluxo-finance
+services:
+  app:
+    build: { context: ., target: php-base }
+    image: fluxo-php:local
+    restart: unless-stopped
+    env_file: .env
+    volumes: [uploads:/var/www/app/storage]
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    mem_limit: 384m
+  worker:
+    image: fluxo-php:local
+    restart: unless-stopped
+    env_file: .env
+    user: www-data
+    command:
+      [
+        php,
+        artisan,
+        "queue:work",
+        "--sleep=1",
+        "--tries=3",
+        "--timeout=300",
+        "--max-time=3600",
+      ]
+    volumes: [uploads:/var/www/app/storage]
+    depends_on: [app]
+    mem_limit: 384m
+  scheduler:
+    image: fluxo-php:local
+    restart: unless-stopped
+    env_file: .env
+    user: www-data
+    command: [php, artisan, "schedule:work"]
+    volumes: [uploads:/var/www/app/storage]
+    depends_on: [app]
+    mem_limit: 128m
+  web:
+    build: { context: ., target: web }
+    restart: unless-stopped
+    ports: ["127.0.0.1:${PREVIEW_PORT:-3196}:8080"]
+    depends_on: [app]
+    mem_limit: 64m
+    healthcheck:
+      test:
+        [CMD-SHELL, "wget -q -O /dev/null http://127.0.0.1:8080/up || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: fluxo
+      MYSQL_USER: fluxo
+      MYSQL_PASSWORD: "${DB_PASSWORD:?Set DB_PASSWORD in .env}"
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}"
+    volumes: [mysql-data:/var/lib/mysql]
+    command: ["--innodb-buffer-pool-size=128M", "--max-connections=40"]
+    mem_limit: 512m
+    healthcheck:
+      test:
+        [
+          CMD-SHELL,
+          'MYSQL_PWD="$$MYSQL_ROOT_PASSWORD" mysqladmin ping -h 127.0.0.1 -u root --silent',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command:
+      [
+        redis-server,
+        "--appendonly",
+        "yes",
+        "--maxmemory",
+        128mb,
+        "--maxmemory-policy",
+        noeviction,
+      ]
+    volumes: [redis-data:/data]
+    mem_limit: 192m
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+volumes:
+  uploads:
+  mysql-data:
+  redis-data:
